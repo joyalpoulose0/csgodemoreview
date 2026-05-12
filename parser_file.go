@@ -1,3 +1,8 @@
+/*
+Main parser file using Go, many of the functions and analytics has been completed using demoinfocs-golang.
+For reference:
+*/
+
 package main
 
 import (
@@ -9,9 +14,9 @@ import (
 	"sort"
 
 	"github.com/golang/geo/r3"
-	dem "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
-	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
-	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
+	dem "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
+	common "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+	events "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
 )
 
 type Vec3 struct {
@@ -383,12 +388,6 @@ func main() {
 
 		kpos := Vec3{}
 		vpos := Vec3{}
-		if e.Killer.LastAlivePosition != (r3.Vector{}) {
-			kpos = vec3(e.Killer.LastAlivePosition)
-		}
-		if e.Victim.LastAlivePosition != (r3.Vector{}) {
-			vpos = vec3(e.Victim.LastAlivePosition)
-		}
 		ke := KillEvent{
 			Tick:          tick,
 			Round:         currentRound,
@@ -556,6 +555,11 @@ func main() {
 			EventType: "exploded",
 		})
 	})
+	p.RegisterEventHandler(func(e events.ConVarsUpdated) {
+		if name, ok := e.UpdatedConVars["mapname"]; ok && name != "" {
+			out.MapName = name
+		}
+	})
 
 	// Position samples (every N ticks)
 	p.RegisterEventHandler(func(e events.FrameDone) {
@@ -566,27 +570,21 @@ func main() {
 		lastTick = tick
 		for _, pl := range p.GameState().Participants().Playing() {
 			pos := pl.Position()
-			vel := pl.Velocity()
+			// vel := pl.Velocity()
 			out.PositionSamples = append(out.PositionSamples, PlayerPositionSample{
-				Tick:     tick,
-				Round:    currentRound,
-				SteamID:  pl.SteamID64,
-				Name:     pl.Name,
-				Pos:      Vec3{float32(pos.X), float32(pos.Y), float32(pos.Z)},
-				IsAlive:  pl.IsAlive(),
-				Velocity: Vec3{float32(vel.X), float32(vel.Y), float32(vel.Z)},
+				Tick:    tick,
+				Round:   currentRound,
+				SteamID: pl.SteamID64,
+				Name:    pl.Name,
+				Pos:     Vec3{float32(pos.X), float32(pos.Y), float32(pos.Z)},
+				IsAlive: pl.IsAlive(),
+				// Velocity: Vec3{float32(vel.X), float32(vel.Y), float32(vel.Z)}, #Couldn't trigger Velocity
 			})
 		}
 	})
 
 	// Parsing the demo
 	fmt.Println("Starting demo parse...")
-	header, err := p.ParseHeader()
-	if err != nil {
-		log.Fatalf("parse header: %v", err)
-	}
-	out.MapName = header.MapName
-	out.MatchID = header.ServerName
 	out.TickRate = p.TickRate()
 
 	err = safeParse(p)
@@ -596,9 +594,7 @@ func main() {
 
 	out.TotalRounds = currentRound
 
-	// build player summaries
 	playerMap := make(map[uint64]*PlayerSummary)
-
 	for _, k := range out.Kills {
 		// killer
 		ps := getOrCreate(playerMap, k.KillerSteamID, k.KillerName)
