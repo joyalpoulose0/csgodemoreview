@@ -199,7 +199,7 @@ def get_round_momentum(data):
 
     kills_by_round = defaultdict(lambda: {"ct": 0, "t": 0})
     for k in kills:
-        side = k.get("killer_side", "")
+        side = k.get("killer_team", "")
         if side == "CT":
             kills_by_round[k["round"]]["ct"] += 1
         elif side == "T":
@@ -248,8 +248,8 @@ def get_opening_duel_stats(data):
     kills = data.get("kills", [])
     entry_kills = [k for k in kills if k.get("is_entry")]
 
-    ct_wins = sum(1 for k in entry_kills if k["killer_side"] == "CT")
-    t_wins  = sum(1 for k in entry_kills if k["killer_side"] == "T")
+    ct_wins = sum(1 for k in entry_kills if k["killer_team"] == "CT")
+    t_wins  = sum(1 for k in entry_kills if k["killer_team"] == "T")
     total   = ct_wins + t_wins
 
     return {
@@ -262,7 +262,7 @@ def get_opening_duel_stats(data):
             {
                 "round":       k["round"],
                 "winner_name": k["killer_name"],
-                "winner_side": k["killer_side"],
+                "winner_side": k["killer_team"],
                 "victim_name": k["victim_name"],
                 "weapon":      k["weapon"],
             }
@@ -299,16 +299,16 @@ def detect_clutches(data):
         rk_sorted = sorted(rk, key=lambda x: x["tick"])
 
         for i, k in enumerate(rk_sorted):
-            if k["killer_side"] == "CT":
+            if k["killer_team"] == "CT":
                 t_alive -= 1
             else:
                 ct_alive -= 1
 
             # check if the victim's side now has exactly 1 alive
             # and the next kills are all by the same player
-            if k["killer_side"] == "CT" and t_alive == 0:
+            if k["killer_team"] == "CT" and t_alive == 0:
                 break
-            if k["killer_side"] == "T" and ct_alive == 0:
+            if k["killer_team"] == "T" and ct_alive == 0:
                 break
 
             # victim_side just lost someone — check if victim_side is now at 1
@@ -318,7 +318,7 @@ def detect_clutches(data):
                 remaining_kills = rk_sorted[i+1:]
                 clutch_kills = [
                     ck for ck in remaining_kills
-                    if ck["killer_side"] == k["victim_side"]
+                    if ck["killer_team"] == k["victim_side"]
                 ]
                 if len(clutch_kills) >= 1:
                     clutch_player = clutch_kills[0]["killer_name"]
