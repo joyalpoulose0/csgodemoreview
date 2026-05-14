@@ -35,6 +35,8 @@ type KillEvent struct {
 	KillerName    string `json:"killer_name"`
 	KillerSteamID uint64 `json:"killer_steam_id"`
 	KillerSide    string `json:"killer_side"`
+	KillerTeam    string `json:"killer_team"`
+	VictimTeam    string `json:"victim_team"`
 	VictimName    string `json:"victim_name"`
 	VictimSteamID uint64 `json:"victim_steam_id"`
 	VictimSide    string `json:"victim_side"`
@@ -118,7 +120,7 @@ type PlayerRoundStats struct {
 	EntryKill      bool   `json:"entry_kill"`
 	EntryDeath     bool   `json:"entry_death"`
 	TradedDeath    bool   `json:"traded_death"`
-	OpeningDuel    bool   `json:"opening_duel"` // was involved in first kill of round
+	OpeningDuel    bool   `json:"opening_duel"`
 	Survived       bool   `json:"survived"`
 }
 
@@ -166,7 +168,7 @@ type DemoOutput struct {
 	Grenades        []GrenadeEvent                `json:"grenades"`
 	BombEvents      []BombEvent                   `json:"bomb_events"`
 	Rounds          []RoundEvent                  `json:"rounds"`
-	PlayerRounds    map[string][]PlayerRoundStats `json:"player_rounds"` // steamid -> per-round stats
+	PlayerRounds    map[string][]PlayerRoundStats `json:"player_rounds"` // steamid to calculate per-round stats
 	PlayerSummaries []PlayerSummary               `json:"player_summaries"`
 	PositionSamples []PlayerPositionSample        `json:"position_samples"` // sampled every 32 ticks
 }
@@ -257,9 +259,11 @@ func main() {
 
 	// per-round tracking
 	type deathRecord struct {
-		tick    int
-		side    string
-		steamID uint64
+		tick          int
+		side          string
+		victimSteamID uint64
+		killerSteamID uint64
+		victimSide    string
 	}
 	var roundDeaths []deathRecord
 	var roundKills []KillEvent
@@ -286,6 +290,10 @@ func main() {
 	tickInterval := 32
 	lastTick := 0
 
+	// Because teams swap halfway we have initialiase and name teams accordingly to track their stats
+	initialTeams := map[uint64]string{}
+	teamsInitialized := false
+
 	// Register for round start
 	p.RegisterEventHandler(func(e events.RoundStart) {
 		fmt.Println("ROUND START")
@@ -298,6 +306,16 @@ func main() {
 		gs := p.GameState()
 		roundCTEquip = 0
 		roundTEquip = 0
+		if !teamsInitialized {
+			for _, pl := range gs.Participants().Playing() {
+				if pl.Team == common.TeamCounterTerrorists {
+					initialTeams[pl.SteamID64] = "TeamA"
+				} else {
+					initialTeams[pl.SteamID64] = "TeamB"
+				}
+			}
+			teamsInitialized = true
+		}
 		for _, pl := range gs.Participants().Playing() {
 
 			if pl.Team == common.TeamCounterTerrorists {
@@ -362,17 +380,24 @@ func main() {
 
 	// Kill
 	p.RegisterEventHandler(func(e events.Kill) {
-		fmt.Println("KILL EVENT TRIGGERED")
+		// fmt.Println("KILL EVENT TRIGGERED")
 		tick := p.GameState().IngameTick()
 		if e.Killer == nil || e.Victim == nil {
 			return
 		}
 
 		// trade detection: killed within 5s (320 ticks @ 64Hz) of a teammate dying
-		tradeTicks := 320
+		tradeTicks := 320 // 5 sec @64 tick
 		isTrade := false
+
 		for _, d := range roundDeaths {
-			if d.side == sideStr(e.Killer.Team) && tick-d.tick <= tradeTicks {
+			sameTeam := d.side == sideStr(e.Killer.Team)
+
+			revengeKill := d.killerSteamID == e.Victim.SteamID64
+
+			withinWindow := tick-d.tick <= tradeTicks
+
+			if sameTeam && revengeKill && withinWindow {
 				isTrade = true
 				break
 			}
@@ -386,14 +411,17 @@ func main() {
 			weapon = e.Weapon.String()
 		}
 
-		kpos := Vec3{}
-		vpos := Vec3{}
+		kpos := vec3(e.Killer.Position())
+		vpos := vec3(e.Victim.Position())
+
 		ke := KillEvent{
 			Tick:          tick,
 			Round:         currentRound,
 			KillerName:    e.Killer.Name,
 			KillerSteamID: e.Killer.SteamID64,
 			KillerSide:    sideStr(e.Killer.Team),
+			KillerTeam:    initialTeams[e.Killer.SteamID64],
+			VictimTeam:    initialTeams[e.Victim.SteamID64],
 			VictimName:    e.Victim.Name,
 			VictimSteamID: e.Victim.SteamID64,
 			VictimSide:    sideStr(e.Victim.Team),
@@ -411,7 +439,11 @@ func main() {
 		out.Kills = append(out.Kills, ke)
 		roundKills = append(roundKills, ke)
 
-		roundDeaths = append(roundDeaths, deathRecord{tick, sideStr(e.Victim.Team), e.Victim.SteamID64})
+		roundDeaths = append(roundDeaths, deathRecord{tick: tick,
+			victimSteamID: e.Victim.SteamID64,
+			killerSteamID: e.Killer.SteamID64,
+			side:          sideStr(e.Victim.Team),
+		})
 
 		// update round player stats
 		ksid := e.Killer.SteamID64
@@ -672,7 +704,7 @@ func main() {
 		return out.PlayerSummaries[i].Kills > out.PlayerSummaries[j].Kills
 	})
 
-	// ── output ──
+	// output
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		log.Fatalf("marshal: %v", err)
