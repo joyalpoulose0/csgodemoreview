@@ -1,6 +1,6 @@
 # CS2 Demo Review
 
-A CS2 (Counter-Strike 2) demo analysis system built with Go + Python that parses `.dem` files, extracts detailed match events and computes performance metrics. Moreover, I plan to integrate LLMs to provide feedback to user on their demo.
+A CS2 (Counter-Strike 2) demo analysis system built with Go + Python that parses `.dem` files, extracts detailed match events and computes performance metrics. Moreover, I have integrated LLMs to provide feedback to user on their demo.
 
 ---
 
@@ -33,7 +33,7 @@ Per player:
 - Weapon kill breakdown
 - Damage consistency score
 
-I have used Go for parsing demos using demoinfocs-golang (github.com/markus-wa/demoinfocs-golang) and Python for feature engineering and computation. Soon, I will implement AI powered coaching feedback using LLMs.
+I have used Go for parsing demos using demoinfocs-golang (github.com/markus-wa/demoinfocs-golang) and Python for feature engineering and computation. After a short break, I have implemented AI powered coaching feedback using LLMs.
 
 How it works: 
 1. Load `.dem` file
