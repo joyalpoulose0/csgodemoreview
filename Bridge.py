@@ -14,7 +14,6 @@ import subprocess
 import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
 _HERE = Path(__file__).parent
 _GO_SRC = _HERE / "parser_file"
@@ -32,7 +31,7 @@ _BLOCK_SIGNALS = [
 ]
 
 
-# Check for Go 
+# ── build / run helpers ────────────────────────────────────────────────────────
 
 def _go_available() -> bool:
     try:
@@ -41,12 +40,12 @@ def _go_available() -> bool:
     except (FileNotFoundError, subprocess.CalledProcessError):
         return False
 
-# Check for builds
+
 def ensure_compiled(force: bool = False):
     if FORCE_GO_RUN:
         return None
     if not force and _BINARY.exists():
-        src_mtime = (_GO_SRC / "main.go").stat().st_mtime
+        src_mtime = (_GO_SRC / "parser_file.go").stat().st_mtime
         bin_mtime = _BINARY.stat().st_mtime
         if bin_mtime >= src_mtime:
             return _BINARY
@@ -101,7 +100,7 @@ def _check_result(result: subprocess.CompletedProcess) -> None:
         )
 
 
-# parse demo or use cached file
+# ── core bridge ────────────────────────────────────────────────────────────────
 
 def parse_demo(demo_path, output_path=None) -> dict:
     """Parse a CS2 .dem file and return a structured dict."""
@@ -137,7 +136,33 @@ def parse_demo(demo_path, output_path=None) -> dict:
             out_path.unlink(missing_ok=True)
 
 
-# Basic stats like kills, deaths and summary
+# ── internal helpers ───────────────────────────────────────────────────────────
+
+def _round_index(data) -> dict:
+    """rounds list → dict keyed by round number for O(1) lookup."""
+    return {r["round"]: r for r in data.get("rounds", [])}
+
+
+def _equip_type(val: int) -> str:
+    if val < 2000:  return "eco"
+    if val < 4500:  return "force"
+    return "full"
+
+
+def _killer_team(kill: dict) -> str:
+    """
+    Return the team label (TeamA/TeamB) of the killer directly from the kill event.
+    The Go parser embeds killer_team / victim_team into every kill event, so no
+    cross-referencing is needed here.
+    """
+    return kill.get("killer_team", "unknown")
+
+
+def _victim_team(kill: dict) -> str:
+    return kill.get("victim_team", "unknown")
+
+
+# ── basic accessors ────────────────────────────────────────────────────────────
 
 def get_player_summary(data, steam_id=None, name=None):
     """Look up a player's aggregate summary by steam ID or name."""
@@ -167,102 +192,117 @@ def get_player_positions(data, steam_id):
     return [p for p in data.get("position_samples", []) if str(p["steam_id"]) == sid]
 
 
-def get_round_events(data, round_num):
+def get_round_events(data, round_num) -> dict:
     """All events (kills, damage, flashes, grenades, bomb) for a given round."""
     return {
-        "round": next((r for r in data.get("rounds", []) if r["round"] == round_num), None),
-        "kills":      [k for k in data.get("kills", [])       if k["round"] == round_num],
-        "damages":    [d for d in data.get("damages", [])     if d["round"] == round_num],
-        "flashes":    [f for f in data.get("flashes", [])     if f["round"] == round_num],
-        "grenades":   [g for g in data.get("grenades", [])    if g["round"] == round_num],
-        "bomb_events":[b for b in data.get("bomb_events", []) if b["round"] == round_num],
+        "round":       next((r for r in data.get("rounds", []) if r["round"] == round_num), None),
+        "kills":       [k for k in data.get("kills", [])       if k["round"] == round_num],
+        "damages":     [d for d in data.get("damages", [])     if d["round"] == round_num],
+        "flashes":     [f for f in data.get("flashes", [])     if f["round"] == round_num],
+        "grenades":    [g for g in data.get("grenades", [])    if g["round"] == round_num],
+        "bomb_events": [b for b in data.get("bomb_events", []) if b["round"] == round_num],
     }
 
 
-def _round_index(data):
-    """
-    Converts rounds list → dict indexed by round number.
-    Prevents repeated bugs like .get() on list.
-    """
-    return {r["round"]: r for r in data.get("rounds", [])}
+# ── round-level analytics ──────────────────────────────────────────────────────
 
-
-# per roound analysis
-
-def get_round_momentum(data):
+def get_round_momentum(data) -> dict:
     """
-    Per-round kill advantage (CT kills minus T kills).
-    Positive = CT dominated, negative = T dominated.
+    Per-round kill advantage by TEAM (TeamA / TeamB), not CT/T role.
+    TeamA = started CT in round 1, TeamB = started T.
+    Positive diff = TeamA dominated, negative = TeamB dominated.
+    Kill team info comes directly from killer_team field in each kill event.
     """
     rounds = data.get("rounds", [])
     kills  = data.get("kills", [])
 
-    kills_by_round = defaultdict(lambda: {"ct": 0, "t": 0})
+    kills_by_round: dict = defaultdict(lambda: {"TeamA": 0, "TeamB": 0})
     for k in kills:
-        side = k.get("killer_team", "")
-        if side == "CT":
-            kills_by_round[k["round"]]["ct"] += 1
-        elif side == "T":
-            kills_by_round[k["round"]]["t"] += 1
+        team = _killer_team(k)
+        if team in ("TeamA", "TeamB"):
+            kills_by_round[k["round"]][team] += 1
 
     momentum = {}
     for r in rounds:
         rnum = r["round"]
-        ct = kills_by_round[rnum]["ct"]
-        t  = kills_by_round[rnum]["t"]
-        momentum[rnum] = {"ct_kills": ct, "t_kills": t, "diff": ct - t}
+        a = kills_by_round[rnum]["TeamA"]
+        b = kills_by_round[rnum]["TeamB"]
+        momentum[rnum] = {"team_a_kills": a, "team_b_kills": b, "diff": a - b}
 
     return momentum
 
 
-def get_round_win_streak(data):
+def get_round_win_streak(data) -> dict:
     """
-    Returns the longest win streak for CT and T sides,
-    and which rounds each streak covers.
+    Longest consecutive win streak for TeamA and TeamB.
+    Uses team_a_score / team_b_score from the Go output which are
+    already halftime-corrected.
     """
     rounds = data.get("rounds", [])
-    ct_streak = t_streak = 0
-    ct_best = t_best = 0
-    ct_start = t_start = 1
+
+    # Determine which team (A/B) won each round by cross-referencing
+    # the CT/T winner with which team was CT that round (from kills).
+    kills_by_round: dict = defaultdict(list)
+    for k in data.get("kills", []):
+        kills_by_round[k["round"]].append(k)
+
+    a_streak = b_streak = 0
+    a_best   = b_best   = 0
 
     for r in rounds:
-        if r["winner"] == "CT":
-            ct_streak += 1
-            t_streak = 0
-            if ct_streak > ct_best:
-                ct_best = ct_streak
-        else:
-            t_streak += 1
-            ct_streak = 0
-            if t_streak > t_best:
-                t_best = t_streak
+        rnum   = r["round"]
+        winner = r.get("winner", "")  # "CT" or "T"
 
-    return {"ct_longest_streak": ct_best, "t_longest_streak": t_best}
+        # find which team was CT this round from any kill event
+        rk = kills_by_round.get(rnum, [])
+        ct_team = "unknown"
+        for k in rk:
+            if k.get("killer_side") == "CT" and k.get("killer_team"):
+                ct_team = k["killer_team"]
+                break
+            if k.get("victim_side") == "CT" and k.get("victim_team"):
+                ct_team = k["victim_team"]
+                break
+
+        t_team = "TeamB" if ct_team == "TeamA" else "TeamA"
+        winning_team = ct_team if winner == "CT" else t_team
+
+        if winning_team == "TeamA":
+            a_streak += 1
+            b_streak  = 0
+            a_best    = max(a_best, a_streak)
+        elif winning_team == "TeamB":
+            b_streak += 1
+            a_streak  = 0
+            b_best    = max(b_best, b_streak)
+
+    return {"team_a_longest_streak": a_best, "team_b_longest_streak": b_best}
 
 
-def get_opening_duel_stats(data):
+def get_opening_duel_stats(data) -> dict:
     """
-    For each round, identify the opening duel (first kill).
-    Returns win rate for CT and T side in opening duels.
+    Per-round opening duel (first kill) win rates by TEAM.
+    Uses killer_team / victim_team embedded directly in each kill event.
     """
-    kills = data.get("kills", [])
+    kills       = data.get("kills", [])
     entry_kills = [k for k in kills if k.get("is_entry")]
 
-    ct_wins = sum(1 for k in entry_kills if k["killer_team"] == "CT")
-    t_wins  = sum(1 for k in entry_kills if k["killer_team"] == "T")
-    total   = ct_wins + t_wins
+    a_wins = sum(1 for k in entry_kills if _killer_team(k) == "TeamA")
+    b_wins = sum(1 for k in entry_kills if _killer_team(k) == "TeamB")
+    total  = a_wins + b_wins
 
     return {
         "total_opening_duels": total,
-        "ct_wins": ct_wins,
-        "t_wins":  t_wins,
-        "ct_win_rate": round(ct_wins / total, 3) if total else 0,
-        "t_win_rate":  round(t_wins  / total, 3) if total else 0,
+        "team_a_wins":     a_wins,
+        "team_b_wins":     b_wins,
+        "team_a_win_rate": round(a_wins / total, 3) if total else 0,
+        "team_b_win_rate": round(b_wins / total, 3) if total else 0,
         "by_round": [
             {
                 "round":       k["round"],
                 "winner_name": k["killer_name"],
-                "winner_side": k["killer_team"],
+                "winner_team": _killer_team(k),
+                "winner_side": k["killer_side"],
                 "victim_name": k["victim_name"],
                 "weapon":      k["weapon"],
             }
@@ -271,145 +311,143 @@ def get_opening_duel_stats(data):
     }
 
 
-def detect_clutches(data):
+def detect_clutches(data) -> list:
     """
-    Detect 1vX clutch situations: a player who is the last alive on their team
-    and gets 2+ kills in that round. Returns per-round clutch info.
-
-    Uses kill-event ordering: once only one killer_steam_id appears in kills
-    after a point, and they chain multiple kills, that's a clutch.
+    Detect 1vX clutch situations per round.
+    A clutch occurs when a player is the last alive on their team and
+    gets at least one more kill. Tracks whether the clutch was won.
     """
     kills  = data.get("kills", [])
     rounds = data.get("rounds", [])
     clutches = []
 
-    kills_by_round = defaultdict(list)
+    kills_by_round: dict = defaultdict(list)
     for k in kills:
         kills_by_round[k["round"]].append(k)
 
     for r in rounds:
-        rnum   = r["round"]
-        rk     = kills_by_round[rnum]
-        winner = r.get("winner", "")
+        rnum = r["round"]
+        rk   = sorted(kills_by_round[rnum], key=lambda x: x["tick"])
 
-        # track alive counts per side from round start (assume 5v5)
-        ct_alive = 5
-        t_alive  = 5
-        # scan kills in tick order
-        rk_sorted = sorted(rk, key=lambda x: x["tick"])
+        ct_alive = t_alive = 5
 
-        for i, k in enumerate(rk_sorted):
-            if k["killer_team"] == "CT":
+        for i, k in enumerate(rk):
+            # update alive counts
+            if k["killer_side"] == "CT":
                 t_alive -= 1
             else:
                 ct_alive -= 1
 
-            # check if the victim's side now has exactly 1 alive
-            # and the next kills are all by the same player
-            if k["killer_team"] == "CT" and t_alive == 0:
-                break
-            if k["killer_team"] == "T" and ct_alive == 0:
+            if ct_alive == 0 or t_alive == 0:
                 break
 
-            # victim_side just lost someone — check if victim_side is now at 1
-            victim_side_alive = ct_alive if k["victim_side"] == "CT" else t_alive
+            # check if victim's side is now at 1
+            victim_side       = k["victim_side"]
+            victim_side_alive = ct_alive if victim_side == "CT" else t_alive
+
             if victim_side_alive == 1:
-                # find the surviving player on victim_side
-                remaining_kills = rk_sorted[i+1:]
-                clutch_kills = [
-                    ck for ck in remaining_kills
-                    if ck["killer_team"] == k["victim_side"]
-                ]
-                if len(clutch_kills) >= 1:
-                    clutch_player = clutch_kills[0]["killer_name"]
-                    clutch_sid    = clutch_kills[0]["killer_steam_id"]
-                    opponents     = (t_alive if k["victim_side"] == "CT" else ct_alive)
+                remaining = rk[i + 1:]
+                clutch_kills = [ck for ck in remaining if ck["killer_side"] == victim_side]
+                if clutch_kills:
+                    opponents = t_alive if victim_side == "CT" else ct_alive
                     clutches.append({
-                        "round":        rnum,
-                        "player":       clutch_player,
-                        "steam_id":     clutch_sid,
-                        "side":         k["victim_side"],
-                        "vs":           opponents + 1,   # 1vX
-                        "kills_in_clutch": len(clutch_kills),
-                        "won":          r["winner"] == k["victim_side"],
+                        "round":            rnum,
+                        "player":           clutch_kills[0]["killer_name"],
+                        "steam_id":         clutch_kills[0]["killer_steam_id"],
+                        "team":             _killer_team(clutch_kills[0]),
+                        "side":             victim_side,
+                        "vs":               opponents + 1,
+                        "kills_in_clutch":  len(clutch_kills),
+                        "won":              r["winner"] == victim_side,
                     })
                 break
 
     return clutches
 
 
-def detect_comeback_rounds(data):
+def detect_comeback_rounds(data) -> list:
     """
-    Rounds where the losing side (by kill count) still won the round.
-    Indicates strong utility, clutch, or economy play.
+    Rounds where the team with fewer kills still won.
+    Uses team_a/team_b kill counts (halftime-correct) and maps
+    the CT/T round winner back to the correct team via kill events.
     """
-    momentum  = get_round_momentum(data)
-    rounds    = data.get("rounds", [])
-    comebacks = []
+    momentum = get_round_momentum(data)
+    rounds   = data.get("rounds", [])
+    kills_by_round: dict = defaultdict(list)
+    for k in data.get("kills", []):
+        kills_by_round[k["round"]].append(k)
 
+    comebacks = []
     for r in rounds:
         rnum   = r["round"]
         winner = r.get("winner", "")
         m      = momentum.get(rnum, {})
-        ct     = m.get("ct_kills", 0)
-        t      = m.get("t_kills", 0)
+        a      = m.get("team_a_kills", 0)
+        b      = m.get("team_b_kills", 0)
 
-        # losing side by kills
-        if ct > t and winner == "T":
-            comebacks.append({"round": rnum, "winner": "T", "ct_kills": ct, "t_kills": t, "kill_deficit": ct - t})
-        elif t > ct and winner == "CT":
-            comebacks.append({"round": rnum, "winner": "CT", "ct_kills": ct, "t_kills": t, "kill_deficit": t - ct})
+        # resolve CT/T winner to TeamA/TeamB
+        rk = kills_by_round.get(rnum, [])
+        ct_team = "unknown"
+        for k in rk:
+            if k.get("killer_side") == "CT" and k.get("killer_team"):
+                ct_team = k["killer_team"]
+                break
+            if k.get("victim_side") == "CT" and k.get("victim_team"):
+                ct_team = k["victim_team"]
+                break
+        t_team       = "TeamB" if ct_team == "TeamA" else "TeamA"
+        winning_team = ct_team if winner == "CT" else t_team
+
+        if a > b and winning_team == "TeamB":
+            comebacks.append({"round": rnum, "winner": "TeamB",
+                               "team_a_kills": a, "team_b_kills": b, "kill_deficit": a - b})
+        elif b > a and winning_team == "TeamA":
+            comebacks.append({"round": rnum, "winner": "TeamA",
+                               "team_a_kills": a, "team_b_kills": b, "kill_deficit": b - a})
 
     return comebacks
 
 
-def get_economy_efficiency(data):
+def get_economy_efficiency(data) -> list:
     """
-    For each round: equipment value spent vs round outcome.
-    Identifies eco wins, force-buy wins, full-buy losses.
+    Per-round buy type (eco / force / full) for each team and whether the
+    lower-spending team won (upset).
     """
     rounds = data.get("rounds", [])
     result = []
-
     for r in rounds:
         ct_val  = r.get("ct_equip_value", 0)
         t_val   = r.get("t_equip_value", 0)
         winner  = r.get("winner", "")
-
         ct_type = _equip_type(ct_val)
         t_type  = _equip_type(t_val)
-
-        upset = (
+        upset   = (
             (ct_type in ("eco", "force") and t_type == "full" and winner == "CT") or
             (t_type  in ("eco", "force") and ct_type == "full" and winner == "T")
         )
-
         result.append({
-            "round":         r["round"],
-            "ct_equip":      ct_val,
-            "t_equip":       t_val,
-            "ct_buy_type":   ct_type,
-            "t_buy_type":    t_type,
-            "winner":        winner,
-            "upset":         upset,
+            "round":       r["round"],
+            "ct_equip":    ct_val,
+            "t_equip":     t_val,
+            "ct_buy_type": ct_type,
+            "t_buy_type":  t_type,
+            "winner":      winner,
+            "upset":       upset,
         })
-
     return result
 
 
-def _equip_type(val: int) -> str:
-    if val < 2000:   return "eco"
-    if val < 4500:   return "force"
-    return "full"
+# ── player-level analytics ─────────────────────────────────────────────────────
 
-
-# Per player analysis ( a simple HLTV style rating)
-
-def get_player_impact_score(data):
+def get_player_impact_score(data) -> dict:
+    """
+    HLTV-style impact rating. Weights entry kills, trade kills,
+    flash assists, ADR, and multi-kill rounds.
+    """
     players = data.get("player_summaries", [])
     kills   = data.get("kills", [])
 
-    kills_by_player = defaultdict(list)
+    kills_by_player: dict = defaultdict(list)
     for k in kills:
         kills_by_player[str(k["killer_steam_id"])].append(k)
 
@@ -418,8 +456,7 @@ def get_player_impact_score(data):
         sid = str(p["steam_id"])
         pk  = kills_by_player[sid]
 
-        # multi-kill round bonus
-        mk_by_round = defaultdict(int)
+        mk_by_round: dict = defaultdict(int)
         for k in pk:
             mk_by_round[k["round"]] += 1
         mk_bonus = sum(
@@ -428,27 +465,27 @@ def get_player_impact_score(data):
         )
 
         score = (
-            len(pk)                          * 1.0  +
-            p.get("entry_kills", 0)          * 1.5  +
-            p.get("trade_kills", 0)          * 1.2  +
-            p.get("flash_assists", 0)        * 0.5  +
-            p.get("adr", 0)                  * 0.01 +
+            len(pk)                     * 1.0 +
+            p.get("entry_kills", 0)     * 1.5 +
+            p.get("trade_kills", 0)     * 1.2 +
+            p.get("flash_assists", 0)   * 0.5 +
+            p.get("adr", 0)             * 0.01 +
             mk_bonus
         )
 
         impact[sid] = {
             "name":  p["name"],
+            "team":  p.get("team", ""),
             "score": round(score, 2),
             "kd":    round(p["kills"] / max(p["deaths"], 1), 2),
             "adr":   round(p.get("adr", 0), 1),
             "kast":  round(p.get("kast", 0), 3),
         }
 
-    # rank by score
     return dict(sorted(impact.items(), key=lambda x: x[1]["score"], reverse=True))
 
 
-def get_weapon_breakdown(data, steam_id=None):
+def get_weapon_breakdown(data, steam_id=None) -> dict:
     """
     Kill count and headshot rate per weapon.
     Pass steam_id to filter to one player, or None for the whole match.
@@ -457,7 +494,7 @@ def get_weapon_breakdown(data, steam_id=None):
     if steam_id:
         kills = [k for k in kills if str(k["killer_steam_id"]) == str(steam_id)]
 
-    weapons: dict[str, dict] = defaultdict(lambda: {"kills": 0, "headshots": 0})
+    weapons: dict = defaultdict(lambda: {"kills": 0, "headshots": 0})
     for k in kills:
         w = k.get("weapon", "unknown")
         weapons[w]["kills"]     += 1
@@ -473,23 +510,19 @@ def get_weapon_breakdown(data, steam_id=None):
     }
 
 
-def get_damage_breakdown(data, steam_id=None):
-    """
-    Damage dealt per hit group (head, chest, etc.) and per weapon.
-    """
+def get_damage_breakdown(data, steam_id=None) -> dict:
+    """Damage dealt per hitgroup and per weapon."""
     damages = data.get("damages", [])
     if steam_id:
         damages = [d for d in damages if str(d["attacker_steam_id"]) == str(steam_id)]
 
-    hitgroups: dict[str, int] = defaultdict(int)
-    by_weapon:  dict[str, int] = defaultdict(int)
+    hitgroups: dict = defaultdict(int)
+    by_weapon: dict = defaultdict(int)
     total = 0
-
     for d in damages:
-        hg  = d.get("hit_group", "unknown")
         dmg = d.get("health_damage", 0)
-        hitgroups[hg]          += dmg
-        by_weapon[d.get("weapon", "unknown")] += dmg
+        hitgroups[d.get("hit_group", "unknown")] += dmg
+        by_weapon[d.get("weapon", "unknown")]    += dmg
         total += dmg
 
     return {
@@ -499,29 +532,28 @@ def get_damage_breakdown(data, steam_id=None):
     }
 
 
-def get_utility_efficiency(data):
+def get_utility_efficiency(data) -> dict:
     """
-    Per-player grenade efficiency: damage dealt per grenade thrown.
-    Also tracks flash efficiency (enemies blinded / flashes thrown).
+    Per-player grenade and flash efficiency.
+    utility_damage / grenade counts HE + molotov damage only.
+    flash_efficiency = enemies flashed / (enemies + teammates flashed).
     """
-    grenades = data.get("grenades", [])
-    damages  = data.get("damages", [])
-    flashes  = data.get("flashes", [])
+    grenades  = data.get("grenades", [])
+    damages   = data.get("damages", [])
+    flashes   = data.get("flashes", [])
     summaries = {str(p["steam_id"]): p for p in data.get("player_summaries", [])}
 
-    # only count HE / molotov / incendiary damage for utility efficiency
     util_weapons = {"HE Grenade", "Molotov", "Incendiary Grenade", "Inferno"}
-    dmg_by_player: dict[str, int] = defaultdict(int)
+    dmg_by_player:  dict = defaultdict(int)
+    gren_by_player: dict = defaultdict(int)
+    enemy_flashes:  dict = defaultdict(int)
+    team_flashes:   dict = defaultdict(int)
+
     for d in damages:
         if d.get("weapon", "") in util_weapons:
             dmg_by_player[str(d["attacker_steam_id"])] += d.get("health_damage", 0)
-
-    gren_by_player: dict[str, int] = defaultdict(int)
     for g in grenades:
         gren_by_player[str(g["thrower_steam_id"])] += 1
-
-    enemy_flashes: dict[str, int] = defaultdict(int)
-    team_flashes:  dict[str, int] = defaultdict(int)
     for f in flashes:
         sid = str(f["thrower_steam_id"])
         if f.get("is_team_flash"):
@@ -529,116 +561,118 @@ def get_utility_efficiency(data):
         else:
             enemy_flashes[sid] += 1
 
-    result = {}
     all_sids = set(dmg_by_player) | set(gren_by_player) | set(enemy_flashes)
+    result = {}
     for sid in all_sids:
-        name   = summaries.get(sid, {}).get("name", sid)
-        ngren  = gren_by_player.get(sid, 0)
-        ndmg   = dmg_by_player.get(sid, 0)
-        nef    = enemy_flashes.get(sid, 0)
-        ntf    = team_flashes.get(sid, 0)
+        ngren = gren_by_player.get(sid, 0)
+        ndmg  = dmg_by_player.get(sid, 0)
+        nef   = enemy_flashes.get(sid, 0)
+        ntf   = team_flashes.get(sid, 0)
         result[sid] = {
-            "name":                  name,
-            "grenades_thrown":       ngren,
-            "utility_damage":        ndmg,
-            "damage_per_grenade":    round(ndmg / ngren, 2) if ngren else 0,
-            "enemies_flashed":       nef,
-            "team_flashes":          ntf,
-            "flash_efficiency":      round(nef / (nef + ntf), 3) if (nef + ntf) else 0,
+            "name":               summaries.get(sid, {}).get("name", sid),
+            "team":               summaries.get(sid, {}).get("team", ""),
+            "grenades_thrown":    ngren,
+            "utility_damage":     ndmg,
+            "damage_per_grenade": round(ndmg / ngren, 2) if ngren else 0,
+            "enemies_flashed":    nef,
+            "team_flashes":       ntf,
+            "flash_efficiency":   round(nef / (nef + ntf), 3) if (nef + ntf) else 0,
         }
 
     return dict(sorted(result.items(), key=lambda x: x[1]["utility_damage"], reverse=True))
 
 
-def get_survival_analysis(data):
+def get_survival_analysis(data) -> dict:
+    """
+    Per-player survival rate, avg time of death, and traded-death rate.
+    """
     player_rounds = data.get("player_rounds", {})
     kills         = data.get("kills", [])
-    rounds        = _round_index(data)   # FIX: always dict now
+    rounds        = _round_index(data)
     tick_rate     = max(data.get("tick_rate", 64), 1)
     summaries     = {str(p["steam_id"]): p for p in data.get("player_summaries", [])}
 
-    deaths_by_player = defaultdict(list)
+    deaths_by_player: dict = defaultdict(list)
     for k in kills:
         deaths_by_player[str(k["victim_steam_id"])].append(k)
 
     result = {}
-
     for sid, rds in player_rounds.items():
-        name     = summaries.get(sid, {}).get("name", sid)
+        p        = summaries.get(sid, {})
         survived = sum(1 for r in rds if r.get("survived"))
         total    = len(rds)
         deaths   = deaths_by_player.get(sid, [])
 
         death_times = []
         for d in deaths:
-            r = rounds.get(d["round"])   # now SAFE (dict lookup)
+            r = rounds.get(d["round"])
             if r:
-                elapsed_ticks = d["tick"] - r["start_tick"]
-                death_times.append(elapsed_ticks / tick_rate)
+                death_times.append((d["tick"] - r["start_tick"]) / tick_rate)
 
         traded = sum(1 for d in deaths if d.get("is_trade"))
-
         result[sid] = {
-            "name": name,
-            "rounds_played": total,
-            "survived": survived,
-            "survival_rate": round(survived / total, 3) if total else 0,
-            "deaths": len(deaths),
-            "traded_deaths": traded,
-            "trade_rate": round(traded / len(deaths), 3) if deaths else 0,
+            "name":             p.get("name", sid),
+            "team":             p.get("team", ""),
+            "rounds_played":    total,
+            "survived":         survived,
+            "survival_rate":    round(survived / total, 3) if total else 0,
+            "deaths":           len(deaths),
+            "traded_deaths":    traded,
+            "trade_rate":       round(traded / len(deaths), 3) if deaths else 0,
             "avg_death_time_s": round(sum(death_times) / len(death_times), 1) if death_times else None,
         }
 
     return dict(sorted(result.items(), key=lambda x: x[1]["survival_rate"], reverse=True))
 
 
-def get_kill_distance_analysis(data, steam_id=None):
+def get_kill_distance_analysis(data, steam_id=None) -> dict:
     """
-    Average and median kill distance per player (or match-wide).
-    Distance is in CS2 world units (1 unit ≈ 0.75 inches).
+    Average, median, and max kill distance per player in CS2 world units.
+    (1 unit ≈ 0.75 inches / ~1.9 cm)
     """
     kills = data.get("kills", [])
     if steam_id:
         kills = [k for k in kills if str(k["killer_steam_id"]) == str(steam_id)]
 
-    by_player: dict[str, list] = defaultdict(list)
+    by_player: dict = defaultdict(list)
     for k in kills:
         kp = k.get("killer_pos", {})
         vp = k.get("victim_pos", {})
         if kp and vp:
-            dx = kp.get("x", 0) - vp.get("x", 0)
-            dy = kp.get("y", 0) - vp.get("y", 0)
-            dist = math.sqrt(dx*dx + dy*dy)
-            by_player[str(k["killer_steam_id"])].append((dist, k["weapon"], k["headshot"]))
+            dx   = kp.get("x", 0) - vp.get("x", 0)
+            dy   = kp.get("y", 0) - vp.get("y", 0)
+            dist = math.sqrt(dx * dx + dy * dy)
+            by_player[str(k["killer_steam_id"])].append(dist)
 
-    summaries = {str(p["steam_id"]): p["name"] for p in data.get("player_summaries", [])}
+    summaries = {str(p["steam_id"]): p for p in data.get("player_summaries", [])}
     result = {}
-    for sid, entries in by_player.items():
-        dists = [e[0] for e in entries]
+    for sid, dists in by_player.items():
         dists.sort()
         n = len(dists)
+        p = summaries.get(sid, {})
         result[sid] = {
-            "name":     summaries.get(sid, sid),
+            "name":     p.get("name", sid),
+            "team":     p.get("team", ""),
             "kills":    n,
             "avg_dist": round(sum(dists) / n, 1) if n else 0,
-            "med_dist": round(dists[n // 2], 1) if n else 0,
-            "max_dist": round(max(dists), 1) if n else 0,
+            "med_dist": round(dists[n // 2], 1)  if n else 0,
+            "max_dist": round(max(dists), 1)      if n else 0,
         }
 
     return dict(sorted(result.items(), key=lambda x: x[1]["avg_dist"], reverse=True))
 
 
-def get_flash_analysis(data):
+def get_flash_analysis(data) -> dict:
     """
-    Per-thrower flash stats: enemies blinded, average duration, team flash count.
-    Also returns the most effective flashes (longest duration on enemies).
+    Per-player flash stats: enemies blinded, avg duration, team flash count,
+    best single flash duration, and overall flash efficiency.
     """
     flashes   = data.get("flashes", [])
-    summaries = {str(p["steam_id"]): p["name"] for p in data.get("player_summaries", [])}
+    summaries = {str(p["steam_id"]): p for p in data.get("player_summaries", [])}
 
-    by_thrower: dict[str, dict] = defaultdict(lambda: {
+    by_thrower: dict = defaultdict(lambda: {
         "enemy_flashes": 0, "team_flashes": 0,
-        "total_enemy_duration": 0.0, "top_flash": 0.0,
+        "total_enemy_dur": 0.0, "top_flash": 0.0,
     })
 
     for f in flashes:
@@ -647,87 +681,96 @@ def get_flash_analysis(data):
         if f.get("is_team_flash"):
             by_thrower[sid]["team_flashes"] += 1
         else:
-            by_thrower[sid]["enemy_flashes"]         += 1
-            by_thrower[sid]["total_enemy_duration"]  += dur
-            by_thrower[sid]["top_flash"]             = max(by_thrower[sid]["top_flash"], dur)
+            by_thrower[sid]["enemy_flashes"]   += 1
+            by_thrower[sid]["total_enemy_dur"]  += dur
+            by_thrower[sid]["top_flash"]         = max(by_thrower[sid]["top_flash"], dur)
 
     result = {}
     for sid, v in by_thrower.items():
         nef = v["enemy_flashes"]
+        p   = summaries.get(sid, {})
         result[sid] = {
-            "name":              summaries.get(sid, sid),
-            "enemy_flashes":     nef,
-            "team_flashes":      v["team_flashes"],
-            "avg_duration_s":    round(v["total_enemy_duration"] / nef, 2) if nef else 0,
-            "best_flash_s":      round(v["top_flash"], 2),
-            "flash_efficiency":  round(nef / max(nef + v["team_flashes"], 1), 3),
+            "name":             p.get("name", sid),
+            "team":             p.get("team", ""),
+            "enemy_flashes":    nef,
+            "team_flashes":     v["team_flashes"],
+            "avg_duration_s":   round(v["total_enemy_dur"] / nef, 2) if nef else 0,
+            "best_flash_s":     round(v["top_flash"], 2),
+            "flash_efficiency": round(nef / max(nef + v["team_flashes"], 1), 3),
         }
 
     return dict(sorted(result.items(), key=lambda x: x[1]["enemy_flashes"], reverse=True))
 
 
-def get_bomb_stats(data):
-    """
-    Bomb plant / defuse / explode summary per player and per site.
-    """
+def get_bomb_stats(data) -> dict:
+    """Bomb plant / defuse / explode summary per player and site."""
     bomb_events = data.get("bomb_events", [])
-    summaries   = {str(p["steam_id"]): p["name"] for p in data.get("player_summaries", [])}
 
     plants   = [b for b in bomb_events if b["event_type"] == "planted"]
     defuses  = [b for b in bomb_events if b["event_type"] == "defused"]
     explodes = [b for b in bomb_events if b["event_type"] == "exploded"]
 
-    plants_by_player:  dict[str, int] = defaultdict(int)
-    defuses_by_player: dict[str, int] = defaultdict(int)
-    plants_by_site:    dict[str, int] = defaultdict(int)
+    plants_by_player:  dict = defaultdict(int)
+    defuses_by_player: dict = defaultdict(int)
+    plants_by_site:    dict = defaultdict(int)
 
     for b in plants:
         plants_by_player[b.get("player_name", "?")] += 1
-        plants_by_site[b.get("site", "?")] += 1
+        plants_by_site[b.get("site", "?")]           += 1
     for b in defuses:
         defuses_by_player[b.get("player_name", "?")] += 1
 
     return {
-        "total_plants":         len(plants),
-        "total_defuses":        len(defuses),
-        "total_explosions":     len(explodes),
-        "defuse_rate":          round(len(defuses) / len(plants), 3) if plants else 0,
-        "plants_by_site":       dict(plants_by_site),
-        "top_planters":         dict(sorted(plants_by_player.items(),  key=lambda x: x[1], reverse=True)),
-        "top_defusers":         dict(sorted(defuses_by_player.items(), key=lambda x: x[1], reverse=True)),
+        "total_plants":     len(plants),
+        "total_defuses":    len(defuses),
+        "total_explosions": len(explodes),
+        "defuse_rate":      round(len(defuses) / len(plants), 3) if plants else 0,
+        "plants_by_site":   dict(plants_by_site),
+        "top_planters":     dict(sorted(plants_by_player.items(),  key=lambda x: x[1], reverse=True)),
+        "top_defusers":     dict(sorted(defuses_by_player.items(), key=lambda x: x[1], reverse=True)),
     }
 
 
-def get_heatmap_points(data, steam_id=None, alive_only=True):
+def get_heatmap_points(data, steam_id=None, alive_only=True) -> list:
     """
-    Returns (x, y) position tuples for heatmap plotting.
-    Positions are sampled from the Go parser every 32 ticks.
+    (x, y) position tuples for heatmap plotting, sampled every 32 ticks.
+    alive_only=True skips dead-player positions (default).
     """
     positions = data.get("position_samples", [])
     if steam_id:
         positions = [p for p in positions if str(p["steam_id"]) == str(steam_id)]
     if alive_only:
         positions = [p for p in positions if p.get("is_alive")]
-    return [(p["pos"]["x"], p["pos"]["y"]) for p in positions if "pos" in p]
+    points = []
+    for p in positions:
+        pos = p.get("pos", {})
+        x, y = pos.get("x"), pos.get("y")
+        if x is not None and y is not None:
+            points.append((x, y))
+    return points
 
 
-def get_death_heatmap_points(data, steam_id=None):
+def get_death_heatmap_points(data, steam_id=None) -> list:
     """
-    Returns (x, y) positions where kills happened (victim position).
-    Useful for generating death heatmaps.
+    (x, y) victim positions for death heatmaps.
+    Skips zero-position events (player not yet spawned).
     """
     kills = data.get("kills", [])
     if steam_id:
         kills = [k for k in kills if str(k["victim_steam_id"]) == str(steam_id)]
-    return [
-        (k["victim_pos"]["x"], k["victim_pos"]["y"])
-        for k in kills if k.get("victim_pos")
-    ]
+    points = []
+    for k in kills:
+        vp = k.get("victim_pos", {})
+        x, y = vp.get("x"), vp.get("y")
+        if x is not None and y is not None and (x != 0 or y != 0):
+            points.append((x, y))
+    return points
 
 
-# Generate analytics
+# ── full analytics bundle ──────────────────────────────────────────────────────
 
-def generate_full_analytics(data):
+def generate_full_analytics(data) -> dict:
+    """Run all analytics and return a single dict for the AI coaching layer."""
     return {
         # match level
         "momentum":         get_round_momentum(data),
@@ -736,7 +779,6 @@ def generate_full_analytics(data):
         "economy":          get_economy_efficiency(data),
         "comebacks":        detect_comeback_rounds(data),
         "bomb_stats":       get_bomb_stats(data),
-
         # player level
         "clutches":         detect_clutches(data),
         "impact":           get_player_impact_score(data),
@@ -748,6 +790,9 @@ def generate_full_analytics(data):
         "damage_breakdown": get_damage_breakdown(data),
     }
 
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
@@ -758,37 +803,45 @@ if __name__ == "__main__":
     out  = sys.argv[2] if len(sys.argv) >= 3 else None
     data = parse_demo(demo, out)
 
-    print(f"\n=== {data['map_name']} | {data['total_rounds']} rounds | "
-          f"CT {data['ct_score']} - {data['t_score']} T ===\n")
+    print(f"\n=== {data['map_name']} | {data['total_rounds']} rounds ===")
+    print(f"    TeamA {data.get('team_a_score', '?')} – {data.get('team_b_score', '?')} TeamB")
+    print(f"    (CT {data['ct_score']} – {data['t_score']} T role-based)\n")
 
-    print("── Player Summaries ──────────────────────────────")
+    print("── Player Summaries ──────────────────────────────────────────")
     for ps in data["player_summaries"]:
         kd = ps["kills"] / max(ps["deaths"], 1)
-        print(f"  {ps['name']:20s}  K/D={kd:.2f}  ADR={ps['adr']:.1f}  "
-              f"KAST={ps['kast']:.0%}  HS={ps['headshots']}  "
-              f"Entry={ps['entry_kills']}  Trade={ps['trade_kills']}")
+        print(f"  [{ps.get('team','?'):5s}] {ps['name']:20s}  "
+              f"K/D={kd:.2f}  ADR={ps['adr']:.1f}  KAST={ps['kast']:.0%}  "
+              f"HS={ps['headshots']}  Entry={ps['entry_kills']}  Trade={ps['trade_kills']}")
 
     analytics = generate_full_analytics(data)
 
-    print("\n── Opening Duel Win Rates ────────────────────────")
+    print("\n── Opening Duel Win Rates ────────────────────────────────────")
     od = analytics["opening_duels"]
-    print(f"  CT: {od['ct_win_rate']:.0%}  T: {od['t_win_rate']:.0%}  ({od['total_opening_duels']} duels)")
+    print(f"  TeamA: {od['team_a_win_rate']:.0%}  TeamB: {od['team_b_win_rate']:.0%}"
+          f"  ({od['total_opening_duels']} duels)")
 
-    print("\n── Clutches ──────────────────────────────────────")
+    print("\n── Clutches ──────────────────────────────────────────────────")
     for c in analytics["clutches"]:
         won = "WON" if c["won"] else "LOST"
-        print(f"  R{c['round']:>2}  {c['player']:20s}  1v{c['vs']}  {c['kills_in_clutch']}K  {won}")
+        print(f"  R{c['round']:>2}  [{c['team']:5s}] {c['player']:20s}"
+              f"  1v{c['vs']}  {c['kills_in_clutch']}K  {won}")
 
-    print("\n── Bomb Stats ────────────────────────────────────")
+    print("\n── Bomb Stats ────────────────────────────────────────────────")
     bs = analytics["bomb_stats"]
     print(f"  Plants: {bs['total_plants']}  Defuses: {bs['total_defuses']}  "
           f"Explosions: {bs['total_explosions']}  Defuse rate: {bs['defuse_rate']:.0%}")
     print(f"  By site: {bs['plants_by_site']}")
 
-    print("\n── Impact Scores ─────────────────────────────────")
+    print("\n── Impact Scores ─────────────────────────────────────────────")
     for sid, imp in analytics["impact"].items():
-        print(f"  {imp['name']:20s}  score={imp['score']:.2f}  "
-              f"K/D={imp['kd']}  ADR={imp['adr']}  KAST={imp['kast']:.0%}")
+        print(f"  [{imp['team']:5s}] {imp['name']:20s}  score={imp['score']:.2f}"
+              f"  K/D={imp['kd']}  ADR={imp['adr']}  KAST={imp['kast']:.0%}")
+
+    ws = analytics["win_streaks"]
+    print(f"\n── Win Streaks ───────────────────────────────────────────────")
+    print(f"  TeamA best: {ws['team_a_longest_streak']}  "
+          f"TeamB best: {ws['team_b_longest_streak']}")
 
     print(f"\nKills: {len(data['kills'])}  Damages: {len(data['damages'])}  "
           f"Grenades: {len(data['grenades'])}  Positions: {len(data['position_samples'])}")
