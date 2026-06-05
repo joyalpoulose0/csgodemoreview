@@ -15,13 +15,9 @@ from typing import Any
 
 from openai import OpenAI
 
-client = OpenAI()  # reads OPENAI_API_KEY from env
+client = OpenAI()  # Not yet setup
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Rule-based insights (run BEFORE the LLM)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Rule based insights
 def rule_based_insights(pf: dict) -> list[dict]:
     """
     Returns a list of insight dicts:
@@ -48,7 +44,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
     avg_dist = pf.get("avg_kill_distance_units", 0)
     rounds = pf.get("rounds_played", 1)
 
-    # ── aim ──────────────────────────────────────────────────────────────────
+    # Aim
     if hs >= 0.55:
         add({"category": "aim", "severity": "good",
              "message": f"Elite headshot rate ({hs:.0%}) — your crosshair placement is strong."})
@@ -59,7 +55,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
         add({"category": "aim", "severity": "bad",
              "message": f"Low headshot rate ({hs:.0%}). Focus on crosshair placement at head height."})
 
-    # ── duels ─────────────────────────────────────────────────────────────────
+    # Duel rate
     if kd >= 1.5:
         add({"category": "dueling", "severity": "good",
              "message": f"Strong K/D ({kd:.2f}) — you're winning most engagements."})
@@ -68,7 +64,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
              "message": f"K/D below 1 ({kd:.2f}). You're losing more duels than you're winning. "
                         "Review your peek timings and crosshair placement."})
 
-    # ── impact ────────────────────────────────────────────────────────────────
+    # Impact
     if adr >= 85:
         add({"category": "impact", "severity": "good",
              "message": f"High ADR ({adr:.1f}) — you deal consistent damage every round."})
@@ -77,7 +73,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
              "message": f"Low ADR ({adr:.1f}). You're not dealing enough damage. "
                         "Prioritise taking damage-efficient duels over passive play."})
 
-    # ── consistency ──────────────────────────────────────────────────────────
+    # consistency
     if consistency < 0.4:
         add({"category": "consistency", "severity": "good",
              "message": "Very consistent damage output across rounds."})
@@ -86,7 +82,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
              "message": "Highly variable damage output — you have explosive rounds but also "
                         "dead rounds. Try to stay impactful even in tough rounds."})
 
-    # ── KAST ─────────────────────────────────────────────────────────────────
+    # KAST
     if kast >= 0.75:
         add({"category": "impact", "severity": "good",
              "message": f"KAST {kast:.0%} — you contribute positively in most rounds."})
@@ -95,7 +91,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
              "message": f"KAST {kast:.0%} is below average. In rounds where you don't get kills, "
                         "focus on assists, trading, or at minimum surviving."})
 
-    # ── entry duels ───────────────────────────────────────────────────────────
+    # Entry Duel
     if opening_wr >= 0.6 and entry_rate >= 0.3:
         add({"category": "opening_duels", "severity": "good",
              "message": f"Winning {opening_wr:.0%} of opening duels at a rate of {entry_rate:.0%}/round — "
@@ -106,7 +102,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
                         f"but only win {opening_wr:.0%}. Consider more support/setup plays "
                         "or improve pre-aim before peeking."})
 
-    # ── trading ───────────────────────────────────────────────────────────────
+    # Trading
     trade_rate = traded_deaths / max(pf.get("deaths", 1), 1)
     if trade_rate >= 0.5:
         add({"category": "trading", "severity": "good",
@@ -117,18 +113,18 @@ def rule_based_insights(pf: dict) -> list[dict]:
              "message": "Low trade rate on your deaths. Your team isn't converting your deaths into value. "
                         "Communicate and bait/trade more deliberately."})
 
-    # ── multi-kills ───────────────────────────────────────────────────────────
+    # Multi Kills
     if mk3 > 0:
         add({"category": "clutch", "severity": "good",
              "message": f"{mk3} round(s) with 3+ kills — strong clutch/pop-off potential."})
 
-    # ── survival ─────────────────────────────────────────────────────────────
+    # Survival
     if survival < 0.25:
         add({"category": "survival", "severity": "bad",
              "message": f"Low survival rate ({survival:.0%}). You're dying too early each round. "
                         "Play for information before committing, and avoid wide peeks without support."})
 
-    # ── utility ───────────────────────────────────────────────────────────────
+    # Utility
     if team_flashes > 3:
         add({"category": "utility", "severity": "bad",
              "message": f"{team_flashes} team flashes this match. "
@@ -151,7 +147,7 @@ def rule_based_insights(pf: dict) -> list[dict]:
              "message": f"Short average flash duration ({flash_dur:.1f}s). "
                         "Use better pop-flash lineups to blind enemies for longer."})
 
-    # ── kill distance ─────────────────────────────────────────────────────────
+    # Kill Distance
     if avg_dist > 1200:
         add({"category": "aim", "severity": "good",
              "message": f"High average kill distance ({avg_dist:.0f} units) — comfortable at range."})
@@ -163,14 +159,12 @@ def rule_based_insights(pf: dict) -> list[dict]:
     return insights
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM feedback
-# ─────────────────────────────────────────────────────────────────────────────
+# LLM Feedback
 
 def generate_feedback(
     pf: dict,
     insights: list[dict] | None = None,
-    model: str = "gpt-4.1-mini",
+    model: str = "gpt-4.1-mini", # Not yet setup
 ) -> str:
     """
     Generate AI coaching feedback for a player.
@@ -245,9 +239,7 @@ Format as a numbered list. Keep it under 400 words total.
     return response.choices[0].message.content
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Combined entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# Combined-
 
 def analyze_player(features: dict, target_steam_id: str | None = None) -> dict:
     """
