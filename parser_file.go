@@ -25,10 +25,7 @@ type Vec3 struct {
 	Z float32 `json:"z"`
 }
 
-/*
-Events happening during a kill (victim, killer details)
-*/
-
+// Killevent and its details
 type KillEvent struct {
 	Tick          int    `json:"tick"`
 	Round         int    `json:"round"`
@@ -46,8 +43,8 @@ type KillEvent struct {
 	NoScope       bool   `json:"noscope"`
 	ThroughSmoke  bool   `json:"through_smoke"`
 	AttackerBlind bool   `json:"attacker_blind"`
-	IsEntry       bool   `json:"is_entry"` // first kill of round
-	IsTrade       bool   `json:"is_trade"` // killed within 3s of teammate death
+	IsEntry       bool   `json:"is_entry"`
+	IsTrade       bool   `json:"is_trade"`
 	KillerPos     Vec3   `json:"killer_pos"`
 	VictimPos     Vec3   `json:"victim_pos"`
 }
@@ -89,7 +86,7 @@ type GrenadeEvent struct {
 type BombEvent struct {
 	Tick       int    `json:"tick"`
 	Round      int    `json:"round"`
-	EventType  string `json:"event_type"` // plant_start, planted, defuse_start, defused, exploded
+	EventType  string `json:"event_type"` // Plant event
 	PlayerName string `json:"player_name"`
 	Site       string `json:"site"`
 }
@@ -98,10 +95,10 @@ type RoundEvent struct {
 	Round        int    `json:"round"`
 	StartTick    int    `json:"start_tick"`
 	EndTick      int    `json:"end_tick"`
-	Winner       string `json:"winner"` // CT or T
+	Winner       string `json:"winner"`
 	WinReason    string `json:"win_reason"`
 	Duration     int    `json:"duration_ticks"`
-	CTEquipValue int    `json:"ct_equip_value"`
+	CTEquipValue int    `json:"ct_equip_value"` // for further analysis of round economy
 	TEquipValue  int    `json:"t_equip_value"`
 }
 
@@ -119,24 +116,25 @@ type PlayerRoundStats struct {
 	TradeKills     int    `json:"trade_kills"`
 	EntryKill      bool   `json:"entry_kill"`
 	EntryDeath     bool   `json:"entry_death"`
+	Round          int    `json:"round"`
 	TradedDeath    bool   `json:"traded_death"`
 	OpeningDuel    bool   `json:"opening_duel"`
 	Survived       bool   `json:"survived"`
 }
 
 type PlayerPositionSample struct {
-	Tick     int    `json:"tick"`
-	Round    int    `json:"round"`
-	SteamID  uint64 `json:"steam_id"`
-	Name     string `json:"name"`
-	Pos      Vec3   `json:"pos"`
-	IsAlive  bool   `json:"is_alive"`
-	Velocity Vec3   `json:"velocity"`
+	Tick    int    `json:"tick"`
+	Round   int    `json:"round"`
+	SteamID uint64 `json:"steam_id"`
+	Name    string `json:"name"`
+	Pos     Vec3   `json:"pos"`
+	IsAlive bool   `json:"is_alive"`
 }
 
 type PlayerSummary struct {
 	SteamID        uint64  `json:"steam_id"`
 	Name           string  `json:"name"`
+	Team           string  `json:"team"` // TeamA or TeamB
 	Kills          int     `json:"kills"`
 	Deaths         int     `json:"deaths"`
 	Assists        int     `json:"assists"`
@@ -150,8 +148,8 @@ type PlayerSummary struct {
 	GrenadesThrown int     `json:"grenades_thrown"`
 	EnemiesFlashed int     `json:"enemies_flashed"`
 	TeamFlashes    int     `json:"team_flashes"`
-	KAST           float64 `json:"kast"` // Kill/Assist/Survive/Trade rate
-	ADR            float64 `json:"adr"`  // average damage per round
+	KAST           float64 `json:"kast"`
+	ADR            float64 `json:"adr"`
 	RoundsPlayed   int     `json:"rounds_played"`
 }
 
@@ -162,15 +160,17 @@ type DemoOutput struct {
 	TotalRounds     int                           `json:"total_rounds"`
 	CTScore         int                           `json:"ct_score"`
 	TScore          int                           `json:"t_score"`
+	TeamAScore      int                           `json:"team_a_score"` // team-stable scores
+	TeamBScore      int                           `json:"team_b_score"`
 	Kills           []KillEvent                   `json:"kills"`
 	Damages         []DamageEvent                 `json:"damages"`
 	Flashes         []FlashEvent                  `json:"flashes"`
 	Grenades        []GrenadeEvent                `json:"grenades"`
 	BombEvents      []BombEvent                   `json:"bomb_events"`
 	Rounds          []RoundEvent                  `json:"rounds"`
-	PlayerRounds    map[string][]PlayerRoundStats `json:"player_rounds"` // steamid to calculate per-round stats
+	PlayerRounds    map[string][]PlayerRoundStats `json:"player_rounds"`
 	PlayerSummaries []PlayerSummary               `json:"player_summaries"`
-	PositionSamples []PlayerPositionSample        `json:"position_samples"` // sampled every 32 ticks
+	PositionSamples []PlayerPositionSample        `json:"position_samples"`
 }
 
 func sideStr(side common.Team) string {
@@ -202,10 +202,7 @@ func hitRegister(hg events.HitGroup) string {
 }
 
 func vec3(p r3.Vector) Vec3 {
-	return Vec3{
-		X: float32(p.X),
-		Y: float32(p.Y),
-		Z: float32(p.Z)}
+	return Vec3{X: float32(p.X), Y: float32(p.Y), Z: float32(p.Z)}
 }
 
 func dist2D(a, b Vec3) float64 {
@@ -226,7 +223,7 @@ func safeParse(p dem.Parser) (err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: go_parser <demo.dem> [output.json]")
+		fmt.Fprintln(os.Stderr, "usage: go run parser_file.go <demo.dem> [output.json]")
 		os.Exit(1)
 	}
 	demoPath := os.Args[1]
@@ -234,6 +231,7 @@ func main() {
 	if len(os.Args) >= 3 {
 		outPath = os.Args[2]
 	}
+
 	f, err := os.Open(demoPath)
 	if err != nil {
 		log.Fatalf("open demo: %v", err)
@@ -241,8 +239,8 @@ func main() {
 	defer f.Close()
 
 	cfg := dem.DefaultParserConfig
-	cfg.MsgQueueBufferSize = -1 // fix for crash-prone demos
-
+	cfg.MsgQueueBufferSize = -1
+	cfg.IgnorePacketEntitiesPanic = true // silently skip broken entity packets (CS2 POV demo bug)
 	p := dem.NewParserWithConfig(f, cfg)
 	defer p.Close()
 	fmt.Println("Parser created successfully")
@@ -251,32 +249,27 @@ func main() {
 		PlayerRounds: make(map[string][]PlayerRoundStats),
 	}
 
-	// Declaring round variables
 	currentRound := 0
 	roundStart := 0
 	roundCTEquip := 0
 	roundTEquip := 0
 
-	// per-round tracking
 	type deathRecord struct {
 		tick          int
-		side          string
-		victimSteamID uint64
 		killerSteamID uint64
-		victimSide    string
+		victimSteamID uint64
+		victimSide    string // side of the player who died
 	}
 	var roundDeaths []deathRecord
 	var roundKills []KillEvent
 	roundPlayerStats := make(map[uint64]*PlayerRoundStats)
 
-	// aggregate damage per player per round for ADR
 	type dmgKey struct {
 		steamID uint64
 		round   int
 	}
 	playerRoundDamage := make(map[dmgKey]int)
 
-	// for KAST: track per player per round: killed/assisted/survived/traded
 	type kastKey struct {
 		steamID uint64
 		round   int
@@ -286,15 +279,33 @@ func main() {
 	kastSurvive := make(map[kastKey]bool)
 	kastTraded := make(map[kastKey]bool)
 
-	// positioning
 	tickInterval := 32
 	lastTick := 0
 
-	// Because teams swap halfway we have initialiase and name teams accordingly to track their stats
+	// initialTeams: assigned once when we first see 10 players (not just round 1,
+	// because some demos have empty participant lists on the very first RoundStart).
+	// TeamA = started as CT, TeamB = started as T.
 	initialTeams := map[uint64]string{}
 	teamsInitialized := false
 
-	// Register for round start
+	tryInitTeams := func(gs dem.GameState) {
+		if teamsInitialized {
+			return
+		}
+		players := gs.Participants().Playing()
+		if len(players) < 10 {
+			return // wait until full lobby is visible
+		}
+		for _, pl := range players {
+			if pl.Team == common.TeamCounterTerrorists {
+				initialTeams[pl.SteamID64] = "TeamA"
+			} else {
+				initialTeams[pl.SteamID64] = "TeamB"
+			}
+		}
+		teamsInitialized = true
+	}
+
 	p.RegisterEventHandler(func(e events.RoundStart) {
 		fmt.Println("ROUND START")
 		currentRound++
@@ -304,20 +315,11 @@ func main() {
 		roundPlayerStats = make(map[uint64]*PlayerRoundStats)
 
 		gs := p.GameState()
+		tryInitTeams(gs)
+
 		roundCTEquip = 0
 		roundTEquip = 0
-		if !teamsInitialized {
-			for _, pl := range gs.Participants().Playing() {
-				if pl.Team == common.TeamCounterTerrorists {
-					initialTeams[pl.SteamID64] = "TeamA"
-				} else {
-					initialTeams[pl.SteamID64] = "TeamB"
-				}
-			}
-			teamsInitialized = true
-		}
 		for _, pl := range gs.Participants().Playing() {
-
 			if pl.Team == common.TeamCounterTerrorists {
 				roundCTEquip += pl.EquipmentValueCurrent()
 			} else {
@@ -325,32 +327,31 @@ func main() {
 			}
 			sid := pl.SteamID64
 			roundPlayerStats[sid] = &PlayerRoundStats{
+				Round:   currentRound,
 				SteamID: sid,
 				Name:    pl.Name,
 				Side:    sideStr(pl.Team),
 			}
 		}
-
 	})
 
-	// Register for round end
 	p.RegisterEventHandler(func(e events.RoundEnd) {
 		endTick := p.GameState().IngameTick()
-
-		// Finds survivors
 		gs := p.GameState()
+
+		// also try here in case round 1 had an empty lobby
+		tryInitTeams(gs)
+
 		for _, pl := range gs.Participants().Playing() {
 			if pl.IsAlive() {
 				sid := pl.SteamID64
-				k := kastKey{sid, currentRound}
-				kastSurvive[k] = true
+				kastSurvive[kastKey{sid, currentRound}] = true
 				if s, ok := roundPlayerStats[sid]; ok {
 					s.Survived = true
 				}
 			}
 		}
 
-		// Saving Per Round player stats
 		for sid, s := range roundPlayerStats {
 			key := fmt.Sprintf("%d", sid)
 			out.PlayerRounds[key] = append(out.PlayerRounds[key], *s)
@@ -366,6 +367,26 @@ func main() {
 			out.TScore++
 		}
 
+		// team-stable score: figure out which team was CT this round
+		if teamsInitialized {
+			// pick any player from roundPlayerStats and check their initial team vs their current side
+			for sid, s := range roundPlayerStats {
+				initTeam := initialTeams[sid]
+				if s.Side == "CT" {
+					if initTeam == "TeamA" && winner == "CT" {
+						out.TeamAScore++
+					} else if initTeam == "TeamB" && winner == "CT" {
+						out.TeamBScore++
+					} else if initTeam == "TeamA" && winner == "T" {
+						out.TeamBScore++
+					} else if initTeam == "TeamB" && winner == "T" {
+						out.TeamAScore++
+					}
+				}
+				break // one player is enough to determine both team sides for the round
+			}
+		}
+
 		out.Rounds = append(out.Rounds, RoundEvent{
 			Round:        currentRound,
 			StartTick:    roundStart,
@@ -378,41 +399,32 @@ func main() {
 		})
 	})
 
-	// Kill
 	p.RegisterEventHandler(func(e events.Kill) {
-		// fmt.Println("KILL EVENT TRIGGERED")
 		tick := p.GameState().IngameTick()
 		if e.Killer == nil || e.Victim == nil {
 			return
 		}
 
-		// trade detection: killed within 5s (320 ticks @ 64Hz) of a teammate dying
-		tradeTicks := 320 // 5 sec @64 tick
+		// Trade detection: the killer avenged a teammate death within the trade window.
+		// A kill is a trade if: victim killed someone on the killer's team recently.
+		tradeTicks := 320 // 5s @ 64Hz
 		isTrade := false
-
 		for _, d := range roundDeaths {
-			sameTeam := d.side == sideStr(e.Killer.Team)
-
-			revengeKill := d.killerSteamID == e.Victim.SteamID64
-
+			sameTeamDied := d.victimSide == sideStr(e.Killer.Team)     // a teammate of killer died
+			wasKilledByVictim := d.killerSteamID == e.Victim.SteamID64 // ...and our current victim killed them
 			withinWindow := tick-d.tick <= tradeTicks
-
-			if sameTeam && revengeKill && withinWindow {
+			if sameTeamDied && wasKilledByVictim && withinWindow {
 				isTrade = true
 				break
 			}
 		}
 
-		// entry kill = first kill of round
 		isEntry := len(roundKills) == 0
 
 		weapon := ""
 		if e.Weapon != nil {
 			weapon = e.Weapon.String()
 		}
-
-		kpos := vec3(e.Killer.Position())
-		vpos := vec3(e.Victim.Position())
 
 		ke := KillEvent{
 			Tick:          tick,
@@ -433,19 +445,19 @@ func main() {
 			AttackerBlind: e.AttackerBlind,
 			IsEntry:       isEntry,
 			IsTrade:       isTrade,
-			KillerPos:     kpos,
-			VictimPos:     vpos,
+			KillerPos:     vec3(e.Killer.Position()),
+			VictimPos:     vec3(e.Victim.Position()),
 		}
 		out.Kills = append(out.Kills, ke)
 		roundKills = append(roundKills, ke)
 
-		roundDeaths = append(roundDeaths, deathRecord{tick: tick,
-			victimSteamID: e.Victim.SteamID64,
+		roundDeaths = append(roundDeaths, deathRecord{
+			tick:          tick,
 			killerSteamID: e.Killer.SteamID64,
-			side:          sideStr(e.Victim.Team),
+			victimSteamID: e.Victim.SteamID64,
+			victimSide:    sideStr(e.Victim.Team),
 		})
 
-		// update round player stats
 		ksid := e.Killer.SteamID64
 		vsid := e.Victim.SteamID64
 		if s, ok := roundPlayerStats[ksid]; ok {
@@ -473,7 +485,6 @@ func main() {
 			}
 		}
 
-		// flash assist
 		if e.AssistedFlash && e.Assister != nil {
 			asid := e.Assister.SteamID64
 			if s, ok := roundPlayerStats[asid]; ok {
@@ -491,7 +502,6 @@ func main() {
 		kastKill[kastKey{ksid, currentRound}] = true
 	})
 
-	// Damage
 	p.RegisterEventHandler(func(e events.PlayerHurt) {
 		if e.Attacker == nil || e.Player == nil {
 			return
@@ -500,7 +510,7 @@ func main() {
 		if e.Weapon != nil {
 			weapon = e.Weapon.String()
 		}
-		de := DamageEvent{
+		out.Damages = append(out.Damages, DamageEvent{
 			Tick:            p.GameState().IngameTick(),
 			Round:           currentRound,
 			AttackerName:    e.Attacker.Name,
@@ -510,23 +520,18 @@ func main() {
 			HealthDamage:    e.HealthDamage,
 			ArmorDamage:     e.ArmorDamage,
 			HitGroup:        hitRegister(e.HitGroup),
-		}
-		out.Damages = append(out.Damages, de)
-
+		})
 		if s, ok := roundPlayerStats[e.Attacker.SteamID64]; ok {
 			s.DamageDealt += e.HealthDamage
 		}
-		k := dmgKey{e.Attacker.SteamID64, currentRound}
-		playerRoundDamage[k] += e.HealthDamage
+		playerRoundDamage[dmgKey{e.Attacker.SteamID64, currentRound}] += e.HealthDamage
 	})
 
-	// Flash
 	p.RegisterEventHandler(func(e events.PlayerFlashed) {
 		if e.Attacker == nil || e.Player == nil {
 			return
 		}
-		isTeam := e.Attacker.Team == e.Player.Team
-		fe := FlashEvent{
+		out.Flashes = append(out.Flashes, FlashEvent{
 			Tick:           p.GameState().IngameTick(),
 			Round:          currentRound,
 			ThrowerName:    e.Attacker.Name,
@@ -535,17 +540,15 @@ func main() {
 			FlashedName:    e.Player.Name,
 			FlashedSide:    sideStr(e.Player.Team),
 			Duration:       float32(e.FlashDuration().Seconds()),
-			IsTeamFlash:    isTeam,
-		}
-		out.Flashes = append(out.Flashes, fe)
+			IsTeamFlash:    e.Attacker.Team == e.Player.Team,
+		})
 	})
 
-	// Grenades (smoke, molotov, HE, decoy)
 	p.RegisterEventHandler(func(e events.GrenadeProjectileDestroy) {
 		if e.Projectile == nil || e.Projectile.Thrower == nil {
 			return
 		}
-		ge := GrenadeEvent{
+		out.Grenades = append(out.Grenades, GrenadeEvent{
 			Tick:           p.GameState().IngameTick(),
 			Round:          currentRound,
 			ThrowerName:    e.Projectile.Thrower.Name,
@@ -553,22 +556,33 @@ func main() {
 			ThrowerSide:    sideStr(e.Projectile.Thrower.Team),
 			GrenadeType:    e.Projectile.WeaponInstance.String(),
 			Position:       vec3(e.Projectile.Position()),
-		}
-		out.Grenades = append(out.Grenades, ge)
+		})
 		if s, ok := roundPlayerStats[e.Projectile.Thrower.SteamID64]; ok {
 			s.GrenadesThrown++
 		}
 	})
 
-	// Bomb events
 	p.RegisterEventHandler(func(e events.BombPlanted) {
 		name := ""
 		if e.Player != nil {
 			name = e.Player.Name
 		}
+
+		site := "Unknown"
+
+		switch e.Site {
+		case events.BombsiteA:
+			site = "A"
+		case events.BombsiteB:
+			site = "B"
+		}
+
 		out.BombEvents = append(out.BombEvents, BombEvent{
-			Tick: p.GameState().IngameTick(), Round: currentRound,
-			EventType: "planted", PlayerName: name, Site: string(rune(e.Site)),
+			Tick:       p.GameState().IngameTick(),
+			Round:      currentRound,
+			EventType:  "planted",
+			PlayerName: name,
+			Site:       site,
 		})
 	})
 	p.RegisterEventHandler(func(e events.BombDefused) {
@@ -587,13 +601,15 @@ func main() {
 			EventType: "exploded",
 		})
 	})
+
+	// Map name via ConVars event
 	p.RegisterEventHandler(func(e events.ConVarsUpdated) {
 		if name, ok := e.UpdatedConVars["mapname"]; ok && name != "" {
 			out.MapName = name
 		}
 	})
 
-	// Position samples (every N ticks)
+	// Position samples every N ticks
 	p.RegisterEventHandler(func(e events.FrameDone) {
 		tick := p.GameState().IngameTick()
 		if tick-lastTick < tickInterval {
@@ -602,7 +618,6 @@ func main() {
 		lastTick = tick
 		for _, pl := range p.GameState().Participants().Playing() {
 			pos := pl.Position()
-			// vel := pl.Velocity()
 			out.PositionSamples = append(out.PositionSamples, PlayerPositionSample{
 				Tick:    tick,
 				Round:   currentRound,
@@ -610,12 +625,10 @@ func main() {
 				Name:    pl.Name,
 				Pos:     Vec3{float32(pos.X), float32(pos.Y), float32(pos.Z)},
 				IsAlive: pl.IsAlive(),
-				// Velocity: Vec3{float32(vel.X), float32(vel.Y), float32(vel.Z)}, #Couldn't trigger Velocity
 			})
 		}
 	})
 
-	// Parsing the demo
 	fmt.Println("Starting demo parse...")
 	out.TickRate = p.TickRate()
 
@@ -628,8 +641,7 @@ func main() {
 
 	playerMap := make(map[uint64]*PlayerSummary)
 	for _, k := range out.Kills {
-		// killer
-		ps := getOrCreate(playerMap, k.KillerSteamID, k.KillerName)
+		ps := getOrCreate(playerMap, k.KillerSteamID, k.KillerName, k.KillerTeam)
 		ps.Kills++
 		if k.Headshot {
 			ps.Headshots++
@@ -640,8 +652,7 @@ func main() {
 		if k.IsTrade {
 			ps.TradeKills++
 		}
-		// victim
-		pv := getOrCreate(playerMap, k.VictimSteamID, k.VictimName)
+		pv := getOrCreate(playerMap, k.VictimSteamID, k.VictimName, k.VictimTeam)
 		pv.Deaths++
 		if k.IsEntry {
 			pv.EntryDeaths++
@@ -651,11 +662,11 @@ func main() {
 		}
 	}
 	for _, d := range out.Damages {
-		ps := getOrCreate(playerMap, d.AttackerSteamID, d.AttackerName)
+		ps := getOrCreate(playerMap, d.AttackerSteamID, d.AttackerName, "")
 		ps.DamageDealt += d.HealthDamage
 	}
 	for _, fl := range out.Flashes {
-		ps := getOrCreate(playerMap, fl.ThrowerSteamID, fl.ThrowerName)
+		ps := getOrCreate(playerMap, fl.ThrowerSteamID, fl.ThrowerName, "")
 		if fl.IsTeamFlash {
 			ps.TeamFlashes++
 		} else {
@@ -663,20 +674,26 @@ func main() {
 		}
 	}
 	for _, g := range out.Grenades {
-		ps := getOrCreate(playerMap, g.ThrowerSteamID, g.ThrowerName)
+		ps := getOrCreate(playerMap, g.ThrowerSteamID, g.ThrowerName, "")
 		ps.GrenadesThrown++
 	}
-
-	// count rounds played
 	for _, rounds := range out.PlayerRounds {
 		if len(rounds) > 0 {
 			sid := rounds[0].SteamID
-			ps := getOrCreate(playerMap, sid, rounds[0].Name)
+			ps := getOrCreate(playerMap, sid, rounds[0].Name, "")
 			ps.RoundsPlayed = len(rounds)
 		}
 	}
 
-	// KAST
+	// fill Team from initialTeams for any player who only appears in damages/flashes/grenades
+	for sid, ps := range playerMap {
+		if ps.Team == "" {
+			if t, ok := initialTeams[sid]; ok {
+				ps.Team = t
+			}
+		}
+	}
+
 	for _, ps := range playerMap {
 		sid := ps.SteamID
 		kastCount := 0
@@ -696,7 +713,6 @@ func main() {
 		}
 	}
 
-	// sort summaries by kills desc
 	for _, ps := range playerMap {
 		out.PlayerSummaries = append(out.PlayerSummaries, *ps)
 	}
@@ -704,12 +720,10 @@ func main() {
 		return out.PlayerSummaries[i].Kills > out.PlayerSummaries[j].Kills
 	})
 
-	// output
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		log.Fatalf("marshal: %v", err)
 	}
-
 	if outPath != "" {
 		if err := os.WriteFile(outPath, data, 0644); err != nil {
 			log.Fatalf("write: %v", err)
@@ -719,14 +733,18 @@ func main() {
 		fmt.Println(string(data))
 	}
 
-	_ = dist2D // suppress unused warning
+	_ = dist2D
+	_ = playerRoundDamage
 }
 
-func getOrCreate(m map[uint64]*PlayerSummary, sid uint64, name string) *PlayerSummary {
+func getOrCreate(m map[uint64]*PlayerSummary, sid uint64, name string, team string) *PlayerSummary {
 	if ps, ok := m[sid]; ok {
+		if ps.Team == "" && team != "" {
+			ps.Team = team
+		}
 		return ps
 	}
-	ps := &PlayerSummary{SteamID: sid, Name: name}
+	ps := &PlayerSummary{SteamID: sid, Name: name, Team: team}
 	m[sid] = ps
 	return ps
 }
